@@ -1,4 +1,7 @@
+import math
+
 import torch
+import torch.nn.functional as F
 
 from einops import rearrange
 from torch import nn
@@ -33,9 +36,20 @@ class CausalSelfAttention(nn.Module):
     return proj
 
   def attention(self, key, query, value, attention_mask):
+    T = query.size(2)
 
-    ### 완성시켜야 할 빈 코드 블록
-    raise NotImplementedError
+    scores = query @ key.transpose(-2, -1) / math.sqrt(self.attention_head_size)
+
+    causal_mask = torch.triu(torch.ones(T, T, device=scores.device), diagonal=1).bool()
+    scores = scores.masked_fill(causal_mask, -10000.0)
+
+    scores = scores + attention_mask
+
+    attn_weights = F.softmax(scores, dim=-1)
+    attn_weights = self.dropout(attn_weights)
+
+    context = attn_weights @ value
+    return rearrange(context, 'b h t d -> b t (h d)')
 
 
   def forward(self, hidden_states, attention_mask):
