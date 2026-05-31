@@ -4,6 +4,7 @@
 SST 과 CFIMDB 위에서 GPT2SentimentClassifier를 훈련하고 평가.
 '''
 
+import torch.nn as nn
 import random, numpy as np, argparse
 from types import SimpleNamespace
 import csv
@@ -56,8 +57,10 @@ class GPT2SentimentClassifier(torch.nn.Module):
     '''
     TODO: BERT 임베딩의 감정 분류를 위해 필요한 인스턴스 변수를 생성하시오.
     '''
-    ### 완성시켜야 할 빈 코드 블록
-    raise NotImplementedError
+    # 감정 분류를 위한 분류 헤드 정의
+    # GPT-2의 마지막 토큰 hidden state(768차원)를 num_labels 클래스로 분류
+    self.dropout = nn.Dropout(config.hidden_dropout_prob)
+    self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
 
   def forward(self, input_ids, attention_mask):
@@ -68,8 +71,17 @@ class GPT2SentimentClassifier(torch.nn.Module):
         힌트: 현재 훈련 반복루프에서 손실 함수로 `F.cross_entropy`를 사용하고 있음을 고려하여
         적절한 반환값이 무엇인지 생각해보시오.
     '''
-    ### 완성시켜야 할 빈 코드 블록
-    raise NotImplementedError
+    # GPT-2 모델에 입력을 넣어 출력을 얻는다.
+    # gpt2.py의 forward()는 'last_token' 키로 마지막 토큰의 hidden state를 반환한다.
+    output = self.gpt(input_ids, attention_mask)
+    last_token = output['last_token']  # [batch_size, hidden_size]
+ 
+    # Dropout 적용 후 분류 헤드를 통해 logits 반환
+    # F.cross_entropy는 raw logits을 받으므로 softmax는 적용하지 않는다.
+    last_token = self.dropout(last_token)
+    logits = self.classifier(last_token)  # [batch_size, num_labels]
+ 
+    return logits
 
 
 class SentimentDataset(Dataset):
