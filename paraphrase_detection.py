@@ -69,8 +69,8 @@ class ParaphraseGPT(nn.Module):
     훈련이 잘 되었다면, 패러프레이즈인 경우에는 토큰 "yes"(BPE index 8505)가, 
     패러프레이즈가 아닌 경우에는 토큰 "no" (BPE index 3919)가 될 것이다.
     """
-    ### 완성시켜야 할 빈 코드 블록
-    raise NotImplementedError
+    output = self.gpt(input_ids, attention_mask)
+    return self.paraphrase_detection_head(output['last_token'])
 
 
 
