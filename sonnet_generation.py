@@ -9,6 +9,7 @@ SonnetGPT 모델을 훈련하고, 필요한 제출용 파일을 작성한다.
 '''
 
 import argparse
+import os
 import random
 import torch
 
@@ -29,9 +30,29 @@ from models.gpt2 import GPT2Model
 from optimizer import AdamW
 
 TQDM_DISABLE = False
+TRAINABLE_GPT_LAYERS = 4
+EARLY_STOPPING_PATIENCE = 2
+EARLY_STOPPING_MIN_DELTA = 1e-3
+GENERATION_TOP_K = 50
+REPETITION_PENALTY = 1.1
+NUM_QUALITATIVE_SAMPLES = 3
 
 
-# 재현성을 위한 random seed 고정.
+def get_torch_device(torch_module, use_gpu):
+  if not use_gpu:
+    return torch_module.device("cpu")
+
+  if torch_module.cuda.is_available():
+    return torch_module.device("cuda")
+
+  mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+  if mps_backend is not None and mps_backend.is_available():
+    return torch_module.device("mps")
+
+  return torch_module.device("cpu")
+
+
+# 재현성을 위한 random seed 고정
 def seed_everything(seed=11711):
   random.seed(seed)
   np.random.seed(seed)
@@ -51,8 +72,16 @@ class SonnetGPT(nn.Module):
     self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    # 기본적으로, 전체 모델을 fine-tuning한다. TODO: 이것은 좋은 생각이 아닌 것 같다.
+    # 작은 소넷 데이터셋에서는 하위 레이어를 고정해 과적합과 GPU 메모리 사용을 줄인다.
     for param in self.gpt.parameters():
+      param.requires_grad = False
+
+    trainable_layers = min(TRAINABLE_GPT_LAYERS, len(self.gpt.gpt_layers))
+    for layer in self.gpt.gpt_layers[-trainable_layers:]:
+      for param in layer.parameters():
+        param.requires_grad = True
+
+    for param in self.gpt.final_layer_norm.parameters():
       param.requires_grad = True
 
   def forward(self, input_ids, attention_mask):
@@ -69,51 +98,68 @@ class SonnetGPT(nn.Module):
       return param.device
 
   @torch.no_grad()
-  def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=128):
+  def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=180):
     """
-    top-p sampling 과 softmax temperature를 사용하여 새로운 소넷을 생성한다.
-
-    TODO: 지금 이 방법은 기대 이하일 수 있다. 영감을 얻기 위해 Hugging Face의 model.generate(...) 함수를 참고해도 좋겠다.
-        여러 시퀀스를 생성하고 beam search를 통해 최적의 시퀀스를 선택하는 것도 좋은 한 가지 방법이다.
-        Top-k 샘플링 역시 또 다른 방법이며, 그 외에도 많은 접근법이 있다.
+    temperature, top-k, top-p sampling을 함께 사용하여 소넷을 생성한다.
     """
     token_ids = encoding.to(self.get_device())
     attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
 
-
     for _ in range(max_length):
-      # logits을 구하기 위한 forward pass.
       logits_sequence = self.forward(token_ids, attention_mask)
-      logits_last_token = logits_sequence[:, -1, :] / temperature  # Apply temperature scaling
+      logits_last_token = logits_sequence[:, -1, :].clone()
 
-      # Convert logits to probabilities
+      # 반복을 줄이고, top-k/top-p sampling으로 다음 토큰 후보를 제한
+      logits_last_token = self._apply_repetition_penalty(logits_last_token, token_ids)
+      logits_last_token = logits_last_token / max(temperature, 1e-5)
+      logits_last_token = self._filter_logits(logits_last_token, top_k=GENERATION_TOP_K, top_p=top_p)
+
       probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
+      sampled_token = torch.multinomial(probs, 1)
 
-      # Top-p (nucleus) sampling
-      sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-      cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-      top_p_mask = cumulative_probs <= top_p
-      top_p_mask[..., 1:] = top_p_mask[..., :-1].clone()  # Shift mask right for proper thresholding
-      top_p_mask[..., 0] = True  # Always include the highest probability token
-      filtered_probs = sorted_probs * top_p_mask  # Zero out unlikely tokens
-      filtered_probs /= filtered_probs.sum(dim=-1, keepdim=True)  # Normalize probabilities
-
-      # Sample from filtered distribution
-      sampled_index = torch.multinomial(filtered_probs, 1)
-      sampled_token = sorted_indices.gather(dim=-1, index=sampled_index)
-
-      # Stop if end-of-sequence token is reached
       if sampled_token.item() == self.tokenizer.eos_token_id:
         break
 
-      # Append sampled token
       token_ids = torch.cat([token_ids, sampled_token], dim=1)
       attention_mask = torch.cat(
         [attention_mask, torch.ones((1, 1), dtype=torch.int64).to(self.get_device())], dim=1
       )
 
-    generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
+    generated_output = self.tokenizer.decode(token_ids[0].cpu().tolist(), skip_special_tokens=True)
     return token_ids, generated_output
+
+  def _apply_repetition_penalty(self, logits, token_ids):
+    if REPETITION_PENALTY == 1.0:
+      return logits
+
+    for batch_idx in range(logits.shape[0]):
+      used_token_ids = set(token_ids[batch_idx].tolist())
+      for token_id in used_token_ids:
+        if logits[batch_idx, token_id] < 0:
+          logits[batch_idx, token_id] *= REPETITION_PENALTY
+        else:
+          logits[batch_idx, token_id] /= REPETITION_PENALTY
+    return logits
+
+  def _filter_logits(self, logits, top_k=0, top_p=1.0):
+    if top_k > 0:
+      top_k = min(top_k, logits.size(-1))
+      kth_values = torch.topk(logits, top_k, dim=-1).values[..., -1, None]
+      logits = logits.masked_fill(logits < kth_values, -float('inf'))
+
+    if top_p < 1.0:
+      sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+      sorted_probs = torch.nn.functional.softmax(sorted_logits, dim=-1)
+      cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+      sorted_indices_to_remove = cumulative_probs > top_p
+      sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+      sorted_indices_to_remove[..., 0] = False
+
+      indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+      logits = logits.masked_fill(indices_to_remove, -float('inf'))
+
+    return logits
 
 
 def save_model(model, optimizer, args, filepath):
@@ -130,23 +176,69 @@ def save_model(model, optimizer, args, filepath):
   print(f"save the model to {filepath}")
 
 
+def get_dev_sonnet_path(args, filename):
+  # dev 파일이 같은 data 폴더에 있으면 검증용으로 사용
+  candidate = os.path.join(os.path.dirname(args.sonnet_path), filename)
+  return candidate if os.path.exists(candidate) else None
+
+
+def language_modeling_loss(logits, token_ids, attention_mask):
+  # padding 위치를 제외하고 다음 토큰 예측 손실만 계산
+  logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
+  labels = token_ids[:, 1:].contiguous().flatten()
+  label_mask = attention_mask[:, 1:].contiguous().flatten().bool()
+  return F.cross_entropy(logits[label_mask], labels[label_mask], reduction='mean')
+
+
+@torch.no_grad()
+def evaluate_sonnet_loss(model, dataloader, device):
+  model.eval()
+  total_loss = 0
+  num_batches = 0
+
+  for batch in tqdm(dataloader, desc='dev', disable=TQDM_DISABLE):
+    b_ids, b_mask = batch['token_ids'], batch['attention_mask']
+    b_ids = b_ids.to(device)
+    b_mask = b_mask.to(device)
+
+    logits = model(b_ids, b_mask)
+    loss = language_modeling_loss(logits, b_ids, b_mask)
+    total_loss += loss.item()
+    num_batches += 1
+
+  return total_loss / max(num_batches, 1)
+
+
 def train(args):
   """Sonnet 데이터셋에서 소넷 생성을 위해 GPT-2 훈련."""
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-  # 데이터, 해당 데이터셋 및 데이터로드 생성하기.
+  device = get_torch_device(torch, args.use_gpu)
+  print(f"Using device: {device}")
+  # 데이터, 해당 데이터셋 및 데이터로드 생성
   sonnet_dataset = SonnetsDataset(args.sonnet_path)
   sonnet_dataloader = DataLoader(sonnet_dataset, shuffle=True, batch_size=args.batch_size,
                                  collate_fn=sonnet_dataset.collate_fn)
 
-  # held-out 데이터셋 만들기: 처음 3 줄만 있다. 나머지를 채우는 것은 여러분 몫이다!
-  held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
+  # dev 정답 파일이 있으면 loss를 기준으로 best checkpoint를 선택
+  dev_prompt_path = get_dev_sonnet_path(args, 'sonnets_held_out_dev.txt')
+  dev_target_path = get_dev_sonnet_path(args, 'TRUE_sonnets_held_out_dev.txt')
+  held_out_sonnet_dataset = SonnetsDataset(dev_prompt_path or args.held_out_sonnet_path)
+  dev_dataloader = None
+  if dev_target_path is not None:
+    dev_sonnet_dataset = SonnetsDataset(dev_target_path)
+    dev_dataloader = DataLoader(dev_sonnet_dataset, shuffle=False, batch_size=args.batch_size,
+                                collate_fn=dev_sonnet_dataset.collate_fn)
 
   args = add_arguments(args)
   model = SonnetGPT(args)
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr)
+  # freeze하지 않은 GPT layer와 final layer norm만 학습
+  trainable_params = [param for param in model.parameters() if param.requires_grad]
+  optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.01)
+
+  best_dev_loss = float('inf')
+  epochs_without_improvement = 0
 
   for epoch in range(args.epochs):
     model.train()
@@ -159,12 +251,10 @@ def train(args):
       b_ids = b_ids.to(device)
       b_mask = b_mask.to(device)
 
-      # 손실, 그래디언트를 계산하고 모델 파라미터 업데이트.
+      # 손실, 그래디언트를 계산하고 모델 파라미터 업데이트
       optimizer.zero_grad()
       logits = model(b_ids, b_mask)
-      logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')  # 시퀀스의 마지막 예측은 무시한다.
-      labels = b_ids[:, 1:].contiguous().flatten()  # 레이블을 구성하기 위해 첫번째 토큰을 무시한다.
-      loss = F.cross_entropy(logits, labels, reduction='mean')
+      loss = language_modeling_loss(logits, b_ids, b_mask)
       loss.backward()
       optimizer.step()
 
@@ -172,37 +262,51 @@ def train(args):
       num_batches += 1
 
     train_loss = train_loss / num_batches
-    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}.")
+    dev_loss = evaluate_sonnet_loss(model, dev_dataloader, device) if dev_dataloader is not None else train_loss
+    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev loss :: {dev_loss :.3f}.")
     print('Generating several output sonnets...')
     model.eval()
-    for batch in held_out_sonnet_dataset:
+    for sample_idx, batch in enumerate(held_out_sonnet_dataset):
+      if sample_idx >= NUM_QUALITATIVE_SAMPLES:
+        break
       encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
       output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
-      print(f'{batch[1]}{output[1]}\n\n')
+      print(f'{output[1]}\n\n')
 
-    # TODO: 소넷의 작은 테이터셋에서 과적합을 방지하기 위한 종료 조건을 생각하시오.
-    save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
+    # dev loss가 좋아질 때만 저장하고, 개선이 없으면 조기 종료
+    if dev_loss + EARLY_STOPPING_MIN_DELTA < best_dev_loss:
+      best_dev_loss = dev_loss
+      epochs_without_improvement = 0
+      save_model(model, optimizer, args, args.filepath)
+    else:
+      epochs_without_improvement += 1
+      print(f"dev loss did not improve for {epochs_without_improvement} epoch(s).")
+
+    if dev_dataloader is not None and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+      print(f"Early stopping at epoch {epoch}; best dev loss :: {best_dev_loss :.3f}.")
+      break
 
 
 @torch.no_grad()
 def generate_submission_sonnets(args):
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-  saved = torch.load(f'{args.epochs-1}_{args.filepath}', weights_only=False)
+  device = get_torch_device(torch, args.use_gpu)
+  print(f"Using device: {device}")
+  checkpoint_path = args.filepath if os.path.exists(args.filepath) else f'{args.epochs-1}_{args.filepath}'
+  saved = torch.load(checkpoint_path, weights_only=False)
 
   model = SonnetGPT(saved['args'])
   model.load_state_dict(saved['model'])
   model = model.to(device)
   model.eval()
 
-  # held-out 데이터셋 만들기: 처음 3 줄만 있다. 나머지를 채우는 것은 여러분 몫이다!
   held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
 
   generated_sonnets = []
   for batch in held_out_sonnet_dataset:
     sonnet_id = batch[0]
     encoding = model.tokenizer(batch[1], return_tensors='pt', padding=False, truncation=True).to(device)
-    output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)[0][0]
-    decoded_output = model.tokenizer.decode(output)
+    # generate가 이미 디코딩된 문자열을 반환
+    decoded_output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)[1]
     full_sonnet = f'{decoded_output}\n\n'
     generated_sonnets.append((sonnet_id, full_sonnet))
 
