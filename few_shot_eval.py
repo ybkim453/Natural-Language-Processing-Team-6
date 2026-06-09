@@ -1,5 +1,6 @@
 import csv
 import random
+import os
 import torch
 import numpy as np
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
@@ -107,17 +108,31 @@ def evaluate(model, tokenizer, test_data, k, device):
     examples = get_examples_for_k(k)
     correct = 0
     total = 0
+    predictions = []
 
     for sent, label in tqdm(test_data, desc=f'{k}-shot'):
         true_sentiment = LABEL_MAP[label]
         prompt = build_prompt(sent, examples)
         pred = get_prediction(model, tokenizer, prompt, device)
+        predictions.append((sent, true_sentiment, pred))
 
         if pred == true_sentiment:
             correct += 1
         total += 1
 
-    return correct / total if total > 0 else 0.0
+    acc = correct / total if total > 0 else 0.0
+    return acc, predictions
+
+
+def save_predictions(predictions, k, acc):
+    os.makedirs('predictions', exist_ok=True)
+    filepath = f'predictions/{k}shot-sst-dev-out.csv'
+    with open(filepath, 'w', newline='') as f:
+        writer = csv.writer(f, delimiter='\t')
+        writer.writerow(['sentence', 'true_label', 'predicted_label'])
+        for sent, true, pred in predictions:
+            writer.writerow([sent, true, pred])
+    print(f'saved: {filepath} (acc: {acc:.3f})')
 
 
 def main():
@@ -133,15 +148,8 @@ def main():
 
     print('Loading SST data...')
     dev_data = load_sst('data/ids-sst-dev.csv')
-    # fine-tuned와 동일한 조건: dev set 전체 사용
     eval_data = dev_data
     print(f'eval samples: {len(eval_data)}')
-
-    print('\n[수작업 선정 예시]')
-    for k in [1, 3, 5]:
-        print(f'\n{k}-shot 예시:')
-        for sent, sentiment in get_examples_for_k(k):
-            print(f'  [{sentiment}] {sent[:70]}...')
 
     finetuned_results = {
         'last-linear-layer': 0.461,
@@ -152,8 +160,9 @@ def main():
     results = {}
 
     for k in [0, 1, 3, 5]:
-        acc = evaluate(model, tokenizer, eval_data, k, device)
+        acc, preds = evaluate(model, tokenizer, eval_data, k, device)
         results[k] = acc
+        save_predictions(preds, k, acc)
         print(f'{k}-shot accuracy: {acc:.3f}')
 
     print('\n----- 최종 비교표 -----')
