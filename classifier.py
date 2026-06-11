@@ -8,6 +8,8 @@ import torch.nn as nn
 import random, numpy as np, argparse
 from types import SimpleNamespace
 import csv
+import json
+import os
 
 import torch
 import torch.nn.functional as F
@@ -355,6 +357,22 @@ def test(args):
       f.write(f"id \t Predicted_Sentiment \n")
       for p, s in zip(test_sent_ids, test_pred):
         f.write(f"{p}, {s} \n")
+
+    # 평가 지표 JSON 저장
+    dataset_name = 'sst' if 'sst' in args.dev else 'cfimdb'
+    result = {
+      'method': 'fine_tuning',
+      'fine_tune_mode': args.fine_tune_mode,
+      'dataset': dataset_name,
+      'dev_acc': round(float(dev_acc), 4),
+      'dev_f1': round(float(dev_f1), 4),
+    }
+    result_path = os.path.join(
+      'predictions', f'{args.fine_tune_mode}-{dataset_name}_result.json'
+    )
+    with open(result_path, 'w') as f:
+      json.dump(result, f, indent=2)
+    print(f"결과 저장: {result_path}")
 
 
 def get_args():
