@@ -12,6 +12,8 @@ ParaphraseGPT model을 훈련 및 평가하고, 필요한 제출용 파일을 �
 '''
 
 import argparse
+import json
+import os
 import random
 import torch
 
@@ -167,7 +169,7 @@ def test(args):
   para_test_dataloader = DataLoader(para_test_data, shuffle=True, batch_size=args.batch_size,
                                     collate_fn=para_test_data.collate_fn)
 
-  dev_para_acc, _, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(para_dev_dataloader, model, device)
+  dev_para_acc, dev_para_f1, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(para_dev_dataloader, model, device)
   print(f"dev paraphrase acc :: {dev_para_acc :.3f}")
   test_para_y_pred, test_para_sent_ids = model_test_paraphrase(para_test_dataloader, model, device)
 
@@ -180,6 +182,17 @@ def test(args):
     f.write(f"id \t Predicted_Is_Paraphrase \n")
     for p, s in zip(test_para_sent_ids, test_para_y_pred):
       f.write(f"{p}, {s} \n")
+
+  # 평가 지표 JSON 저장
+  result = {
+    'method': 'paraphrase_detection',
+    'dev_acc': round(float(dev_para_acc), 4),
+    'dev_f1': round(float(dev_para_f1), 4),
+  }
+  result_path = os.path.join('predictions', 'para_result.json')
+  with open(result_path, 'w') as f:
+    json.dump(result, f, indent=2)
+  print(f"결과 저장: {result_path}")
 
 
 def get_args():
