@@ -1,4 +1,6 @@
 import csv
+import json
+import os
 import random
 import torch
 import numpy as np
@@ -164,6 +166,17 @@ def main():
     print('-' * 47)
     for method, acc in finetuned_results.items():
         print(f'fine-tuned ({method}){"":<13} {acc:>10.3f}')
+
+    # 평가 지표 JSON 저장
+    result = {
+        'method': 'few_shot',
+        'few_shot_results': {f'{k}-shot': round(acc, 4) for k, acc in results.items()},
+        'finetuned_baseline': finetuned_results,
+    }
+    result_path = os.path.join('predictions', 'few_shot_result.json')
+    with open(result_path, 'w') as f:
+        json.dump(result, f, indent=2)
+    print(f"결과 저장: {result_path}")
 
     print('\n완료!')
 
