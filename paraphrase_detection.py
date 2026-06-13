@@ -12,6 +12,8 @@ ParaphraseGPT model을 훈련 및 평가하고, 필요한 제출용 파일을 �
 '''
 
 import argparse
+import json
+import os
 import random
 import torch
 
@@ -31,6 +33,7 @@ from evaluation import model_eval_paraphrase, model_test_paraphrase
 from models.gpt2 import GPT2Model
 
 from optimizer import AdamW
+from utils import format_parameter_count_table, get_torch_device, parameter_count_rows
 
 TQDM_DISABLE = False
 
@@ -53,9 +56,21 @@ class ParaphraseGPT(nn.Module):
     self.gpt = GPT2Model.from_pretrained(model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
     self.paraphrase_detection_head = nn.Linear(args.d, 2)  # Paraphrase detection 의 출력은 두 가지: 1 (yes) or 0 (no).
 
-    # 기본적으로, 전체 모델을 finetuning 한다.
-    for param in self.gpt.parameters():
-      param.requires_grad = True
+    fine_tune_mode = getattr(args, 'fine_tune_mode', 'full-model')
+    if fine_tune_mode == 'full-model':
+      for param in self.gpt.parameters():
+        param.requires_grad = True
+    elif fine_tune_mode == 'lora':
+      self.gpt.enable_lora(
+        rank=getattr(args, 'lora_rank', 8),
+        alpha=getattr(args, 'lora_alpha', 16),
+        dropout=getattr(args, 'lora_dropout', 0.05),
+      )
+      for param in self.parameters():
+        param.requires_grad = False
+      self.gpt.mark_only_lora_as_trainable()
+    else:
+      raise ValueError(f'Unsupported fine_tune_mode: {fine_tune_mode}')
 
   def forward(self, input_ids, attention_mask):
     """
@@ -69,8 +84,8 @@ class ParaphraseGPT(nn.Module):
     훈련이 잘 되었다면, 패러프레이즈인 경우에는 토큰 "yes"(BPE index 8505)가, 
     패러프레이즈가 아닌 경우에는 토큰 "no" (BPE index 3919)가 될 것이다.
     """
-    ### 완성시켜야 할 빈 코드 블록
-    raise NotImplementedError
+    output = self.gpt(input_ids, attention_mask)
+    return self.gpt.hidden_state_to_token(output['last_token'])
 
 
 
@@ -90,7 +105,8 @@ def save_model(model, optimizer, args, filepath):
 
 def train(args):
   """Quora 데이터셋에서 Paraphrase Detection을 위한 GPT-2 훈련."""
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  device = get_torch_device(torch, args.use_gpu)
+  print(f"Using device: {device}")
   # 데이터, 해당 데이터셋 및 데이터로드 생성하기.
   para_train_data = load_paraphrase_data(args.para_train)
   para_dev_data = load_paraphrase_data(args.para_dev)
@@ -106,9 +122,11 @@ def train(args):
   args = add_arguments(args)
   model = ParaphraseGPT(args)
   model = model.to(device)
+  print(format_parameter_count_table(parameter_count_rows(model, args.fine_tune_mode)))
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
+  trainable_params = [param for param in model.parameters() if param.requires_grad]
+  optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.)
   best_dev_acc = 0
 
   for epoch in range(args.epochs):
@@ -141,13 +159,16 @@ def train(args):
       best_dev_acc = dev_acc
       save_model(model, optimizer, args, args.filepath)
 
-    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
+    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}, dev f1 :: {dev_f1 :.3f}")
+
+  print(f"Best dev acc ({args.fine_tune_mode}) :: {best_dev_acc :.3f}")
 
 
 @torch.no_grad()
 def test(args):
   """Evaluate your model on the dev and test datasets; save the predictions to disk."""
-  device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+  device = get_torch_device(torch, args.use_gpu)
+  print(f"Using device: {device}")
   saved = torch.load(args.filepath)
 
   model = ParaphraseGPT(saved['args'])
@@ -167,8 +188,23 @@ def test(args):
   para_test_dataloader = DataLoader(para_test_data, shuffle=True, batch_size=args.batch_size,
                                     collate_fn=para_test_data.collate_fn)
 
-  dev_para_acc, _, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(para_dev_dataloader, model, device)
+  dev_para_acc, dev_para_f1, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(
+    para_dev_dataloader, model, device
+  )
   print(f"dev paraphrase acc :: {dev_para_acc :.3f}")
+  print(f"dev paraphrase f1 :: {dev_para_f1 :.3f}")
+
+  result = {
+    'method': 'paraphrase_detection',
+    'dev_acc': round(float(dev_para_acc), 4),
+    'dev_f1': round(float(dev_para_f1), 4),
+  }
+  result_path = os.path.join('predictions', 'para_result.json')
+  os.makedirs(os.path.dirname(result_path), exist_ok=True)
+  with open(result_path, 'w') as f:
+    json.dump(result, f, indent=2)
+  print(f"결과 저장: {result_path}")
+
   test_para_y_pred, test_para_sent_ids = model_test_paraphrase(para_test_dataloader, model, device)
 
   with open(args.para_dev_out, "w+") as f:
@@ -180,6 +216,17 @@ def test(args):
     f.write(f"id \t Predicted_Is_Paraphrase \n")
     for p, s in zip(test_para_sent_ids, test_para_y_pred):
       f.write(f"{p}, {s} \n")
+
+  # 평가 지표 JSON 저장
+  result = {
+    'method': 'paraphrase_detection',
+    'dev_acc': round(float(dev_para_acc), 4),
+    'dev_f1': round(float(dev_para_f1), 4),
+  }
+  result_path = os.path.join('predictions', 'para_result.json')
+  with open(result_path, 'w') as f:
+    json.dump(result, f, indent=2)
+  print(f"결과 저장: {result_path}")
 
 
 def get_args():
@@ -200,6 +247,11 @@ def get_args():
   parser.add_argument("--model_size", type=str,
                       help="The model size as specified on hugging face. DO NOT use the xl model.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large'], default='gpt2')
+  parser.add_argument("--fine_tune_mode", "--fine-tune-mode", dest="fine_tune_mode", type=str,
+                      choices=['full-model', 'lora'], default='full-model')
+  parser.add_argument("--lora_rank", type=int, default=8)
+  parser.add_argument("--lora_alpha", type=int, default=16)
+  parser.add_argument("--lora_dropout", type=float, default=0.05)
 
   args = parser.parse_args()
   return args
@@ -226,7 +278,7 @@ def add_arguments(args):
 
 if __name__ == "__main__":
   args = get_args()
-  args.filepath = f'{args.epochs}-{args.lr}-paraphrase.pt'  # 경로명 저장.
+  args.filepath = f'{args.epochs}-{args.lr}-{args.fine_tune_mode}-paraphrase.pt'  # 경로명 저장.
   seed_everything(args.seed)  # 재현성을 위한 random seed 고정.
   train(args)
   test(args)

@@ -1,0 +1,6 @@
+{
+  "method": "sonnet_generation",
+  "metric": "dev_loss",
+  "lower_is_better": true,
+  "best_dev_loss": 4.571
+}
