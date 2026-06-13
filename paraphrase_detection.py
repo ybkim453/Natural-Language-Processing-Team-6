@@ -217,6 +217,17 @@ def test(args):
     for p, s in zip(test_para_sent_ids, test_para_y_pred):
       f.write(f"{p}, {s} \n")
 
+  # 평가 지표 JSON 저장
+  result = {
+    'method': 'paraphrase_detection',
+    'dev_acc': round(float(dev_para_acc), 4),
+    'dev_f1': round(float(dev_para_f1), 4),
+  }
+  result_path = os.path.join('predictions', 'para_result.json')
+  with open(result_path, 'w') as f:
+    json.dump(result, f, indent=2)
+  print(f"결과 저장: {result_path}")
+
 
 def get_args():
   parser = argparse.ArgumentParser()
