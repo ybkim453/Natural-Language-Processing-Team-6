@@ -126,7 +126,7 @@ def evaluate(model, tokenizer, test_data, k, device):
 
 def save_predictions(predictions, k, acc):
     os.makedirs('predictions', exist_ok=True)
-    filepath = f'predictions/{k}shot-sst-dev-out.csv'
+    filepath = f'predictions/fewshot-{k}shot-sst-dev-out.csv'
     with open(filepath, 'w', newline='') as f:
         writer = csv.writer(f, delimiter='\t')
         writer.writerow(['sentence', 'true_label', 'predicted_label'])
@@ -175,7 +175,6 @@ def main():
         print(f'fine-tuned ({method}){"":<13} {acc:>10.3f}')
 
     print('\n완료!')
-
 
 if __name__ == '__main__':
     main()
