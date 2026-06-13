@@ -28,6 +28,7 @@ from datasets import (
 from models.gpt2 import GPT2Model
 
 from optimizer import AdamW
+from utils import format_parameter_count_table, parameter_count_rows
 
 TQDM_DISABLE = False
 TRAINABLE_GPT_LAYERS = 4
@@ -72,17 +73,31 @@ class SonnetGPT(nn.Module):
     self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    # 작은 소넷 데이터셋에서는 하위 레이어를 고정해 과적합과 GPU 메모리 사용을 줄인다.
-    for param in self.gpt.parameters():
-      param.requires_grad = False
-
-    trainable_layers = min(TRAINABLE_GPT_LAYERS, len(self.gpt.gpt_layers))
-    for layer in self.gpt.gpt_layers[-trainable_layers:]:
-      for param in layer.parameters():
+    fine_tune_mode = getattr(args, 'fine_tune_mode', 'partial-model')
+    if fine_tune_mode == 'full-model':
+      for param in self.gpt.parameters():
         param.requires_grad = True
+    elif fine_tune_mode == 'partial-model':
+      # 작은 소넷 데이터셋에서는 하위 레이어를 고정해 과적합과 GPU 메모리 사용을 줄인다.
+      for param in self.gpt.parameters():
+        param.requires_grad = False
 
-    for param in self.gpt.final_layer_norm.parameters():
-      param.requires_grad = True
+      trainable_layers = min(TRAINABLE_GPT_LAYERS, len(self.gpt.gpt_layers))
+      for layer in self.gpt.gpt_layers[-trainable_layers:]:
+        for param in layer.parameters():
+          param.requires_grad = True
+
+      for param in self.gpt.final_layer_norm.parameters():
+        param.requires_grad = True
+    elif fine_tune_mode == 'lora':
+      self.gpt.enable_lora(
+        rank=getattr(args, 'lora_rank', 8),
+        alpha=getattr(args, 'lora_alpha', 16),
+        dropout=getattr(args, 'lora_dropout', 0.05),
+      )
+      self.gpt.mark_only_lora_as_trainable()
+    else:
+      raise ValueError(f'Unsupported fine_tune_mode: {fine_tune_mode}')
 
   def forward(self, input_ids, attention_mask):
     """
@@ -176,6 +191,25 @@ def save_model(model, optimizer, args, filepath):
   print(f"save the model to {filepath}")
 
 
+def save_sonnet_result(best_dev_loss, result_path='predictions/sonnet_result.json'):
+  import json
+  import math
+  import os
+
+  loss_value = float(best_dev_loss)
+  result = {
+    'method': 'sonnet_generation',
+    'metric': 'dev_loss',
+    'lower_is_better': True,
+    'best_dev_loss': round(loss_value, 4) if math.isfinite(loss_value) else None,
+  }
+
+  os.makedirs(os.path.dirname(result_path), exist_ok=True)
+  with open(result_path, 'w') as f:
+    json.dump(result, f, indent=2)
+  print(f"결과 저장: {result_path}")
+
+
 def get_dev_sonnet_path(args, filename):
   # dev 파일이 같은 data 폴더에 있으면 검증용으로 사용
   candidate = os.path.join(os.path.dirname(args.sonnet_path), filename)
@@ -231,9 +265,10 @@ def train(args):
   args = add_arguments(args)
   model = SonnetGPT(args)
   model = model.to(device)
+  print(format_parameter_count_table(parameter_count_rows(model, args.fine_tune_mode)))
 
   lr = args.lr
-  # freeze하지 않은 GPT layer와 final layer norm만 학습
+  # 선택한 fine-tuning 모드에서 freeze하지 않은 파라미터만 학습
   trainable_params = [param for param in model.parameters() if param.requires_grad]
   optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.01)
 
@@ -285,6 +320,8 @@ def train(args):
     if dev_dataloader is not None and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
       print(f"Early stopping at epoch {epoch}; best dev loss :: {best_dev_loss :.3f}.")
       break
+
+  save_sonnet_result(best_dev_loss)
 
 
 @torch.no_grad()
@@ -339,6 +376,11 @@ def get_args():
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
+  parser.add_argument("--fine_tune_mode", "--fine-tune-mode", dest="fine_tune_mode", type=str,
+                      choices=['full-model', 'partial-model', 'lora'], default='lora')
+  parser.add_argument("--lora_rank", type=int, default=8)
+  parser.add_argument("--lora_alpha", type=int, default=16)
+  parser.add_argument("--lora_dropout", type=float, default=0.05)
 
   args = parser.parse_args()
   return args
@@ -365,7 +407,7 @@ def add_arguments(args):
 
 if __name__ == "__main__":
   args = get_args()
-  args.filepath = f'{args.epochs}-{args.lr}-sonnet.pt'  # 경로명 저장.
+  args.filepath = f'{args.epochs}-{args.lr}-{args.fine_tune_mode}-sonnet.pt'  # 경로명 저장.
   seed_everything(args.seed)  # 재현성을 위한 random seed 고정.
   train(args)
   generate_submission_sonnets(args)

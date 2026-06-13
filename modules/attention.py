@@ -7,6 +7,38 @@ from einops import rearrange
 from torch import nn
 
 
+class LoRALinear(nn.Module):
+  def __init__(self, linear_layer, rank=8, alpha=16, dropout=0.0):
+    super().__init__()
+    if rank <= 0:
+      raise ValueError("LoRA rank must be positive.")
+
+    self.linear = linear_layer
+    self.rank = rank
+    self.alpha = alpha
+    self.scaling = alpha / rank
+    self.lora_dropout = nn.Dropout(dropout)
+    self.lora_A = nn.Linear(linear_layer.in_features, rank, bias=False)
+    self.lora_B = nn.Linear(rank, linear_layer.out_features, bias=False)
+
+    nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+    nn.init.zeros_(self.lora_B.weight)
+
+  def forward(self, x):
+    lora_update = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
+    return self.linear(x) + lora_update
+
+  def lora_parameters(self):
+    yield self.lora_A.weight
+    yield self.lora_B.weight
+
+  def mark_only_lora_as_trainable(self):
+    for param in self.linear.parameters():
+      param.requires_grad = False
+    for param in self.lora_parameters():
+      param.requires_grad = True
+
+
 class CausalSelfAttention(nn.Module):
   def __init__(self, config):
     super().__init__()
@@ -23,6 +55,20 @@ class CausalSelfAttention(nn.Module):
     # 이 드롭아웃은 트랜스포머의 원래 구현에 따라 normalized attention scores에 적용된다.
     # 다소 이례적이지만, 경험적으로 이것이 더 나은 성능을 제공한다고 알려져 있다.
     self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+  def enable_lora(self, rank=8, alpha=16, dropout=0.0):
+    self.query = self._wrap_with_lora(self.query, rank, alpha, dropout)
+    self.value = self._wrap_with_lora(self.value, rank, alpha, dropout)
+
+  def _wrap_with_lora(self, linear_layer, rank, alpha, dropout):
+    if isinstance(linear_layer, LoRALinear):
+      return linear_layer
+    return LoRALinear(linear_layer, rank=rank, alpha=alpha, dropout=dropout)
+
+  def mark_only_lora_as_trainable(self):
+    for linear_layer in (self.query, self.value):
+      if isinstance(linear_layer, LoRALinear):
+        linear_layer.mark_only_lora_as_trainable()
 
   def transform(self, x, linear_layer):
     # hidden_state (x) 를 사영하기 위해 k, v, q의 해당 linear_layer가 사용된다.

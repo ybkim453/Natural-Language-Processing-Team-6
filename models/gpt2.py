@@ -4,6 +4,7 @@ from transformers import GPT2Model as OpenAIGPT2Model
 
 from config import GPT2Config
 from models.base_gpt import GPTPreTrainedModel
+from modules.attention import LoRALinear
 from modules.gpt2_layer import GPT2Layer
 from utils import get_extended_attention_mask
 
@@ -42,6 +43,23 @@ class GPT2Model(GPTPreTrainedModel):
     self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     self.init_weights()
+
+  def enable_lora(self, rank=8, alpha=16, dropout=0.0):
+    for layer in self.gpt_layers:
+      layer.self_attention.enable_lora(rank=rank, alpha=alpha, dropout=dropout)
+
+  def mark_only_lora_as_trainable(self):
+    for param in self.parameters():
+      param.requires_grad = False
+
+    for module in self.modules():
+      if isinstance(module, LoRALinear):
+        module.mark_only_lora_as_trainable()
+
+  def lora_parameters(self):
+    for module in self.modules():
+      if isinstance(module, LoRALinear):
+        yield from module.lora_parameters()
 
   def embed(self, input_ids):
     input_shape = input_ids.size()
