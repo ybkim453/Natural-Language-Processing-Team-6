@@ -40,4 +40,30 @@
 * 프로젝트 PART-I을 수행하면서, 위에서 설치된 패키지만을 사용해야 하며, 별도의 다른 패키지는 허용되지 않는다.
 * 모든 command 옵션이나 파라미터는 변경/추가하면 안된다.
 
+## LoRA 실험
+
+`CausalSelfAttention`의 query/value projection에 LoRA 어댑터를 삽입했다. `lora` 모드에서는 GPT-2 backbone 전체를 고정하고, 각 attention layer의 Q/V LoRA 파라미터만 학습한다.
+
+Paraphrase Detection accuracy 실험:
+
+```bash
+conda run -n nlp_proj python paraphrase_detection.py --fine_tune_mode lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --use_gpu
+conda run -n nlp_proj python paraphrase_detection.py --fine_tune_mode full-model --use_gpu
+```
+
+Sonnet Generation 실험:
+
+```bash
+conda run -n nlp_proj python sonnet_generation.py --fine_tune_mode lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --use_gpu
+conda run -n nlp_proj python sonnet_generation.py --fine_tune_mode full-model --use_gpu
+```
+
+기본 GPT-2 설정(`gpt2`, rank=8, Q/V LoRA)의 학습 파라미터 수 비교:
+
+| Mode | Trainable params | Total params | Trainable % |
+| --- | ---: | ---: | ---: |
+| full-model | 110,865,408 | 110,865,408 | 100.0000% |
+| lora | 294,912 | 111,160,320 | 0.2653% |
+
+학습 로그에는 동일한 형식의 파라미터 비교표가 출력된다. Paraphrase는 `Best dev acc (lora)` 및 `dev paraphrase acc`를 LoRA 적용 모델 accuracy로 기록하고, full-model 실행 결과와 같은 epoch/lr 조건에서 비교한다.
 

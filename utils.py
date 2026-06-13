@@ -46,6 +46,64 @@ def model_size_to_params(model_size):
   else:
     raise Exception(f'{model_size} is not supported.')
 
+
+def get_torch_device(torch_module, use_gpu):
+  if not use_gpu:
+    return torch_module.device("cpu")
+
+  if torch_module.cuda.is_available():
+    return torch_module.device("cuda")
+
+  mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+  if mps_backend is not None and mps_backend.is_available():
+    return torch_module.device("mps") # 맥 이용시
+
+  return torch_module.device("cpu")
+
+
+def count_parameters(model, trainable_only=False, exclude_lora=False):
+  return sum(
+    param.numel() for name, param in model.named_parameters()
+    if (param.requires_grad or not trainable_only)
+    and (not exclude_lora or "lora_" not in name)
+  )
+
+
+def parameter_count_rows(model, current_mode):
+  total_params = count_parameters(model)
+  full_model_params = count_parameters(model, exclude_lora=True)
+  rows = [{
+    "mode": "full-model",
+    "trainable_params": full_model_params,
+    "total_params": full_model_params,
+    "trainable_percent": 100.0,
+  }]
+
+  if current_mode != "full-model":
+    trainable_params = count_parameters(model, trainable_only=True)
+    rows.append({
+      "mode": current_mode,
+      "trainable_params": trainable_params,
+      "total_params": total_params,
+      "trainable_percent": (trainable_params / total_params * 100.0) if total_params else 0.0,
+    })
+
+  return rows
+
+
+def format_parameter_count_table(rows):
+  lines = [
+    "| Mode | Trainable params | Total params | Trainable % |",
+    "| --- | ---: | ---: | ---: |",
+  ]
+  for row in rows:
+    lines.append(
+      f"| {row['mode']} | {row['trainable_params']:,} | "
+      f"{row['total_params']:,} | {row['trainable_percent']:.4f}% |"
+    )
+  return "\n".join(lines)
+
+
 def is_torch_available():
   return True
 
