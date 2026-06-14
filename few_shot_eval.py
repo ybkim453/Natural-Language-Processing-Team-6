@@ -7,31 +7,46 @@ import numpy as np
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from tqdm import tqdm
 
-LABEL_MAP = {
-    0: 'negative',
-    1: 'negative',
-    2: 'neutral',
-    3: 'positive',
-    4: 'positive',
+CANDIDATES = [' 0', ' 1', ' 2', ' 3', ' 4']
+
+# 레이블별 수작업 예시 — 클래스당 5개 (k-shot 최대 5까지 지원)
+EXAMPLES_BY_LABEL = {
+    0: [
+        "a complete waste of time and money .",
+        "this is one of the worst films i have ever seen .",
+        "made me unintentionally famous -- as the queasy-stomached critic who staggered from the theater and blacked out in the lobby .",
+        "a party-hearty teen flick that scalds like acid .",
+        "dull , lifeless , and completely devoid of any entertainment value .",
+    ],
+    1: [
+        "it 's not a great monster movie .",
+        "this is n't a new idea .",
+        "frida is n't that much different from many a hollywood romance .",
+        "the film fails to deliver on its promise .",
+        "disappointing and forgettable .",
+    ],
+    2: [
+        "the film is neither good nor bad .",
+        "a passable but unremarkable entry in the genre .",
+        "it has its moments but ultimately falls short .",
+        "an average film that does nothing particularly wrong or right .",
+        "watchable but not especially memorable .",
+    ],
+    3: [
+        "yet the act is still charming here .",
+        "`` extreme ops '' exceeds expectations .",
+        "it 's been done before but never so vividly or with so much passion .",
+        "a solid and entertaining film .",
+        "worth watching for its strong performances .",
+    ],
+    4: [
+        "the actors are fantastic .",
+        "the gorgeously elaborate continuation of `` the lord of the rings '' trilogy is so huge that a column of words can not adequately describe co-writer\/director peter jackson 's expanded vision of j.r.r. tolkien 's middle-earth .",
+        "a masterpiece of modern cinema .",
+        "an unforgettable and deeply moving experience .",
+        "one of the best films of the year .",
+    ],
 }
-
-VALID_LABELS = {0, 1, 3, 4}
-
-MANUAL_POS = [
-    "yet the act is still charming here .",
-    "the actors are fantastic .",
-    "`` extreme ops '' exceeds expectations .",
-    "it 's been done before but never so vividly or with so much passion .",
-    "the gorgeously elaborate continuation of `` the lord of the rings '' trilogy is so huge that a column of words can not adequately describe co-writer\/director peter jackson 's expanded vision of j.r.r. tolkien 's middle-earth .",
-]
-
-MANUAL_NEG = [
-    "this is n't a new idea .",
-    "it 's not a great monster movie .",
-    "a party-hearty teen flick that scalds like acid .",
-    "frida is n't that much different from many a hollywood romance .",
-    "made me unintentionally famous -- as the queasy-stomached critic who staggered from the theater and blacked out in the lobby .",
-]
 
 
 def seed_everything(seed=11711):
@@ -45,22 +60,21 @@ def load_sst(filename):
         for record in csv.DictReader(fp, delimiter='\t'):
             sent = record['sentence'].lower().strip()
             label = int(record['sentiment'].strip())
-            if label in VALID_LABELS:
-                data.append((sent, label))
+            data.append((sent, label))
     return data
 
 
 def build_prompt(test_sent, examples):
     prompt = ''
-    for sent, sentiment in examples:
-        prompt += f'Review: "{sent}"\nSentiment: {sentiment}\n\n'
+    for sent, label in examples:
+        prompt += f'Review: "{sent}"\nSentiment: {label}\n\n'
     prompt += f'Review: "{test_sent}"\nSentiment:'
     return prompt
 
 
 def get_prediction(model, tokenizer, prompt, device):
     results = {}
-    for candidate in [' positive', ' negative']:
+    for candidate in CANDIDATES:
         full_text = prompt + candidate
         inputs = tokenizer(
             full_text,
@@ -90,17 +104,17 @@ def get_prediction(model, tokenizer, prompt, device):
 
         results[candidate.strip()] = log_prob
 
-    return 'positive' if results['positive'] > results['negative'] else 'negative'
+    return int(max(results, key=results.get))
 
 
 def get_examples_for_k(k):
+    """클래스당 k개씩, 총 k*5개 예시 반환."""
     if k == 0:
         return []
-    half = k // 2
-    remainder = k % 2
-    pos = [(s, 'positive') for s in MANUAL_POS[:half + remainder]]
-    neg = [(s, 'negative') for s in MANUAL_NEG[:half]]
-    examples = pos + neg
+    examples = []
+    for label, sents in EXAMPLES_BY_LABEL.items():
+        for sent in sents[:k]:
+            examples.append((sent, label))
     random.shuffle(examples)
     return examples
 
@@ -109,17 +123,35 @@ def evaluate(model, tokenizer, test_data, k, device):
     examples = get_examples_for_k(k)
     correct = 0
     total = 0
+    records = []
 
-    for sent, label in tqdm(test_data, desc=f'{k}-shot'):
-        true_sentiment = LABEL_MAP[label]
+    for sent, label in tqdm(test_data, desc=f'{k}-shot ({k*5} examples)'):
         prompt = build_prompt(sent, examples)
         pred = get_prediction(model, tokenizer, prompt, device)
 
-        if pred == true_sentiment:
+        if pred == label:
             correct += 1
         total += 1
+        records.append((sent, label, pred))
 
-    return correct / total if total > 0 else 0.0
+    acc = correct / total if total > 0 else 0.0
+
+    out_path = os.path.join('predictions', f'few-shot-{k}shot-dev-out.csv')
+    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['sentence', 'true_label', 'predicted_label'])
+        writer.writerows(records)
+
+    return acc
+
+
+def load_finetuned_results():
+    results = {}
+    for mode in ['last-linear-layer', 'full-model']:
+        path = os.path.join('predictions', f'{mode}-sst_result.json')
+        with open(path) as f:
+            results[mode] = json.load(f)['dev_acc']
+    return results
 
 
 def main():
@@ -135,48 +167,40 @@ def main():
 
     print('Loading SST data...')
     dev_data = load_sst('data/ids-sst-dev.csv')
-    # fine-tuned와 동일한 조건: dev set 전체 사용
-    eval_data = dev_data
-    print(f'eval samples: {len(eval_data)}')
+    print(f'eval samples: {len(dev_data)}')
 
-    print('\n[수작업 선정 예시]')
-    for k in [1, 3, 5]:
-        print(f'\n{k}-shot 예시:')
-        for sent, sentiment in get_examples_for_k(k):
-            print(f'  [{sentiment}] {sent[:70]}...')
+    finetuned_results = load_finetuned_results()
 
-    finetuned_results = {
-        'last-linear-layer': 0.461,
-        'full-model': 0.407,
-    }
-
-    print('\n===== Few-shot vs Zero-shot 평가 결과 =====\n')
+    print('\n===== Few-shot vs Zero-shot 평가 결과 (SST 5-class, 클래스당 k개) =====\n')
     results = {}
 
     for k in [0, 1, 3, 5]:
-        acc = evaluate(model, tokenizer, eval_data, k, device)
+        n_examples = k * 5
+        print(f'\n[{k}-shot] 프롬프트 예시 {n_examples}개 사용')
+        acc = evaluate(model, tokenizer, dev_data, k, device)
         results[k] = acc
         print(f'{k}-shot accuracy: {acc:.3f}')
 
     print('\n----- 최종 비교표 -----')
-    print(f'{"방법":<35} {"Accuracy":>10}')
-    print('-' * 47)
+    print(f'{"방법":<40} {"예시 수":>8} {"Accuracy":>10}')
+    print('-' * 60)
     for k, acc in results.items():
-        print(f'{k}-shot (base GPT-2){"":<17} {acc:>10.3f}')
-    print('-' * 47)
+        print(f'{k}-shot (base GPT-2){"":<22} {k*5:>8} {acc:>10.3f}')
+    print('-' * 60)
     for method, acc in finetuned_results.items():
-        print(f'fine-tuned ({method}){"":<13} {acc:>10.3f}')
+        print(f'fine-tuned ({method}){"":<18} {"전체":>8} {acc:>10.3f}')
 
-    # 평가 지표 JSON 저장
     result = {
         'method': 'few_shot',
+        'task': 'sst-5class',
+        'scheme': 'k-shot per class',
         'few_shot_results': {f'{k}-shot': round(acc, 4) for k, acc in results.items()},
         'finetuned_baseline': finetuned_results,
     }
     result_path = os.path.join('predictions', 'few_shot_result.json')
     with open(result_path, 'w') as f:
         json.dump(result, f, indent=2)
-    print(f"결과 저장: {result_path}")
+    print(f"\n결과 저장: {result_path}")
 
     print('\n완료!')
 
