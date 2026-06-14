@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import random
+import os
 import torch
 import numpy as np
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
@@ -128,6 +129,7 @@ def evaluate(model, tokenizer, test_data, k, device):
     for sent, label in tqdm(test_data, desc=f'{k}-shot ({k*5} examples)'):
         prompt = build_prompt(sent, examples)
         pred = get_prediction(model, tokenizer, prompt, device)
+        predictions.append((sent, true_sentiment, pred))
 
         if pred == label:
             correct += 1
@@ -179,6 +181,7 @@ def main():
         print(f'\n[{k}-shot] 프롬프트 예시 {n_examples}개 사용')
         acc = evaluate(model, tokenizer, dev_data, k, device)
         results[k] = acc
+        save_predictions(preds, k, acc)
         print(f'{k}-shot accuracy: {acc:.3f}')
 
     print('\n----- 최종 비교표 -----')
@@ -203,7 +206,6 @@ def main():
     print(f"\n결과 저장: {result_path}")
 
     print('\n완료!')
-
 
 if __name__ == '__main__':
     main()

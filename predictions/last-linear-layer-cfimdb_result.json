@@ -1,0 +1,8 @@
+{
+  "method": "sentiment_analysis",
+  "fine_tune_mode": "last-linear-layer",
+  "dataset": "cfimdb",
+  "dev_acc": 0.5796,
+  "dev_f1": 0.5033,
+  "num_examples": 245
+}

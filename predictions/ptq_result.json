@@ -1,0 +1,19 @@
+{
+  "method": "ptq",
+  "checkpoint": "sst-classifier.pt",
+  "fp32": {
+    "acc": 0.3915,
+    "f1": 0.334,
+    "size_mb": 477.04,
+    "latency_ms": 101.37
+  },
+  "int8": {
+    "acc": 0.3906,
+    "f1": 0.3261,
+    "size_mb": 232.4,
+    "latency_ms": 129.55
+  },
+  "accuracy_drop": 0.0009,
+  "size_reduction_pct": 51.28,
+  "speedup_pct": -21.76
+}

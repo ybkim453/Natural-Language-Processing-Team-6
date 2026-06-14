@@ -2,5 +2,10 @@
   "method": "sonnet_generation",
   "metric": "dev_loss",
   "lower_is_better": true,
-  "best_dev_loss": 4.571
+  "best_dev_loss": 4.571,
+  "perplexity": 96.6407,
+  "chrf": 25.9102,
+  "chrf_generated_path": "predictions/generated_sonnets.txt",
+  "chrf_gold_path": "data/TRUE_sonnets_held_out_dev.txt",
+  "chrf_warning": "generated_sonnets_dev.txt was not found; CHRF used generated_sonnets.txt with the available dev gold file."
 }
