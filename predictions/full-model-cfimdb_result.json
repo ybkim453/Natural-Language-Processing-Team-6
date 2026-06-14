@@ -1,0 +1,8 @@
+{
+  "method": "sentiment_analysis",
+  "fine_tune_mode": "full-model",
+  "dataset": "cfimdb",
+  "dev_acc": 0.8939,
+  "dev_f1": 0.8938,
+  "num_examples": 245
+}

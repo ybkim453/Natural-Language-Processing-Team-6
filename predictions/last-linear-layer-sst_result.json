@@ -1,0 +1,8 @@
+{
+  "method": "sentiment_analysis",
+  "fine_tune_mode": "last-linear-layer",
+  "dataset": "sst",
+  "dev_acc": 0.4678,
+  "dev_f1": 0.4232,
+  "num_examples": 1101
+}

@@ -1,0 +1,63 @@
+{
+  "sentiment_analysis": {
+    "selected_mode": "full-model",
+    "sst_acc": 0.4678,
+    "cfimdb_acc": 0.8939,
+    "all_results": {
+      "full-model": {
+        "sst": {
+          "method": "sentiment_analysis",
+          "fine_tune_mode": "full-model",
+          "dataset": "sst",
+          "dev_acc": 0.4678,
+          "dev_f1": 0.4232,
+          "num_examples": 1101
+        },
+        "cfimdb": {
+          "method": "sentiment_analysis",
+          "fine_tune_mode": "full-model",
+          "dataset": "cfimdb",
+          "dev_acc": 0.8939,
+          "dev_f1": 0.8938,
+          "num_examples": 245
+        }
+      },
+      "last-linear-layer": {
+        "sst": {
+          "method": "sentiment_analysis",
+          "fine_tune_mode": "last-linear-layer",
+          "dataset": "sst",
+          "dev_acc": 0.4678,
+          "dev_f1": 0.4232,
+          "num_examples": 1101
+        },
+        "cfimdb": {
+          "method": "sentiment_analysis",
+          "fine_tune_mode": "last-linear-layer",
+          "dataset": "cfimdb",
+          "dev_acc": 0.5796,
+          "dev_f1": 0.5033,
+          "num_examples": 245
+        }
+      }
+    }
+  },
+  "paraphrase_detection": {
+    "acc": 0.8379,
+    "f1": 0.8281,
+    "source": "predictions/para_result.json"
+  },
+  "sonnet_generation": {
+    "chrf": 25.9102,
+    "perplexity": 96.6407,
+    "best_dev_loss": 4.571,
+    "source": "predictions/sonnet_result.json"
+  },
+  "table": {
+    "sst_acc": 0.4678,
+    "cfimdb_acc": 0.8939,
+    "paraphrase_acc": 0.8379,
+    "sonnet_chrf": 25.9102,
+    "sonnet_perplexity": 96.6407
+  }
+}
