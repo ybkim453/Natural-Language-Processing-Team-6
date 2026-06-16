@@ -1,0 +1,11 @@
+{
+  "method": "prefix_tuning",
+  "prefix_length": 50,
+  "total_params": 125955845,
+  "trainable_params": 925445,
+  "trainable_ratio_pct": 0.7347,
+  "best_dev_acc": 0.4787,
+  "epochs": 10,
+  "lr": 0.001,
+  "batch_size": 8
+}
