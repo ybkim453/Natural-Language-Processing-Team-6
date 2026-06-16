@@ -1,0 +1,15 @@
+{
+  "method": "few_shot",
+  "task": "sst-5class",
+  "scheme": "k-shot per class",
+  "few_shot_results": {
+    "0-shot": 0.1662,
+    "1-shot": 0.2652,
+    "3-shot": 0.2189,
+    "5-shot": 0.208
+  },
+  "finetuned_baseline": {
+    "last-linear-layer": 0.4678,
+    "full-model": 0.4223
+  }
+}

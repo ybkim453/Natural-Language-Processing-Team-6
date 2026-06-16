@@ -1,0 +1,12 @@
+{
+  "method": "lora",
+  "lora_r": 4,
+  "lora_alpha": 16.0,
+  "total_params": 125181701,
+  "trainable_params": 151301,
+  "trainable_ratio_pct": 0.1209,
+  "best_dev_acc": 0.4959,
+  "epochs": 10,
+  "lr": 0.001,
+  "batch_size": 8
+}
